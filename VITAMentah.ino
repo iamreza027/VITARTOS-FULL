@@ -28,10 +28,20 @@ byte tpoBuf[8];
    NETWORK SERVER
 ============================================================ */
 
-WiFiServer server8998(8998);
+WiFiServer server8998(8998);  // ESP32 SERVER
 
-WiFiClient serverClient8989;
-WiFiClient serverClient8998;
+WiFiClient serverClient;
+WiFiClient incomingClient;  // client yang connect ke ESP32:8998
+
+//Auto Reconnect
+unsigned long lastReconnect8989 = 0;
+
+
+const uint32_t reconnectInterval = 5000;
+
+unsigned long lastWifiReconnect = 0;
+const uint32_t wifiReconnectInterval = 5000;
+
 
 /* ============================================================
    CONFIG STORAGE (Preferences)
@@ -64,6 +74,9 @@ typedef struct
 
   char volumeLevel[8];
   char vadThreshold[4][8];
+
+  char vad[2];
+  char IDCardNow[16];
 
 } DeviceConfiguration;
 
@@ -118,16 +131,14 @@ const char *apPassword = "12345678";
    SOCKET DEBUG HELPERS
 ============================================================ */
 
-void debugRx(const char* port,const char* msg)
-{
+void debugRx(const char *port, const char *msg) {
   Serial.print("[RX ");
   Serial.print(port);
   Serial.print("] ");
   Serial.println(msg);
 }
 
-void debugTx(const char* port,const char* msg)
-{
+void debugTx(const char *port, const char *msg) {
   Serial.print("[TX ");
   Serial.print(port);
   Serial.print("] ");
@@ -166,32 +177,48 @@ String buildExportFrame() {
   String frame = "VITA~";
   char buffer[64];
 
-  frame += deviceConfig.site; frame += "~";
-  frame += deviceConfig.vehicleType; frame += "~";
-  frame += deviceConfig.unitNumber; frame += "~";
-  frame += deviceConfig.wifiSSID; frame += "~";
-  frame += deviceConfig.wifiPassword; frame += "~";
-  frame += deviceConfig.serverIP; frame += "~";
-  frame += deviceConfig.destination; frame += "~";
-  frame += deviceConfig.username; frame += "~";
-  frame += deviceConfig.password; frame += "~";
+  frame += deviceConfig.site;
+  frame += "~";
+  frame += deviceConfig.vehicleType;
+  frame += "~";
+  frame += deviceConfig.unitNumber;
+  frame += "~";
+  frame += deviceConfig.wifiSSID;
+  frame += "~";
+  frame += deviceConfig.wifiPassword;
+  frame += "~";
+  frame += deviceConfig.serverIP;
+  frame += "~";
+  frame += deviceConfig.destination;
+  frame += "~";
+  frame += deviceConfig.username;
+  frame += "~";
+  frame += deviceConfig.password;
+  frame += "~";
 
   joinHash(deviceConfig.rpmGenerator, buffer);
-  frame += buffer; frame += "~";
+  frame += buffer;
+  frame += "~";
 
   joinHash(deviceConfig.overspeedLimit, buffer);
-  frame += buffer; frame += "~";
+  frame += buffer;
+  frame += "~";
 
-  frame += deviceConfig.coastingSpeed; frame += "~";
-  frame += deviceConfig.diffLockLimit; frame += "~";
+  frame += deviceConfig.coastingSpeed;
+  frame += "~";
+  frame += deviceConfig.diffLockLimit;
+  frame += "~";
 
   joinHash(deviceConfig.timerWarning, buffer);
-  frame += buffer; frame += "~";
+  frame += buffer;
+  frame += "~";
 
   joinHash(deviceConfig.timerRelease, buffer);
-  frame += buffer; frame += "~";
+  frame += buffer;
+  frame += "~";
 
-  frame += deviceConfig.volumeLevel; frame += "~";
+  frame += deviceConfig.volumeLevel;
+  frame += "~";
 
   joinHash(deviceConfig.vadThreshold, buffer);
   frame += buffer;
@@ -244,6 +271,79 @@ void saveConfig() {
   configStorage.end();
 }
 
+
+/* ============================================================
+   LOAD CONFIG
+============================================================ */
+
+void loadConfig() {
+  configStorage.begin("devicecfg", true);
+
+  String s;
+
+  s = configStorage.getString("site", "");
+  strncpy(deviceConfig.site, s.c_str(), sizeof(deviceConfig.site));
+
+  s = configStorage.getString("type", "");
+  strncpy(deviceConfig.vehicleType, s.c_str(), sizeof(deviceConfig.vehicleType));
+
+  s = configStorage.getString("unit", "");
+  strncpy(deviceConfig.unitNumber, s.c_str(), sizeof(deviceConfig.unitNumber));
+
+  s = configStorage.getString("ssid", "");
+  strncpy(deviceConfig.wifiSSID, s.c_str(), sizeof(deviceConfig.wifiSSID));
+
+  s = configStorage.getString("pwdwifi", "");
+  strncpy(deviceConfig.wifiPassword, s.c_str(), sizeof(deviceConfig.wifiPassword));
+
+  s = configStorage.getString("server", "");
+  strncpy(deviceConfig.serverIP, s.c_str(), sizeof(deviceConfig.serverIP));
+
+  s = configStorage.getString("dest", "");
+  strncpy(deviceConfig.destination, s.c_str(), sizeof(deviceConfig.destination));
+
+  s = configStorage.getString("user", "");
+  strncpy(deviceConfig.username, s.c_str(), sizeof(deviceConfig.username));
+
+  s = configStorage.getString("pwd", "");
+  strncpy(deviceConfig.password, s.c_str(), sizeof(deviceConfig.password));
+
+  char buffer[64];
+
+  s = configStorage.getString("rpm", "");
+  strncpy(buffer, s.c_str(), sizeof(buffer));
+  splitHash(buffer, deviceConfig.rpmGenerator);
+
+  s = configStorage.getString("overspeed", "");
+  strncpy(buffer, s.c_str(), sizeof(buffer));
+  splitHash(buffer, deviceConfig.overspeedLimit);
+
+  s = configStorage.getString("coasting", "");
+  strncpy(deviceConfig.coastingSpeed, s.c_str(), sizeof(deviceConfig.coastingSpeed));
+
+  s = configStorage.getString("difflock", "");
+  strncpy(deviceConfig.diffLockLimit, s.c_str(), sizeof(deviceConfig.diffLockLimit));
+
+  s = configStorage.getString("warn", "");
+  strncpy(buffer, s.c_str(), sizeof(buffer));
+  splitHash(buffer, deviceConfig.timerWarning);
+
+  s = configStorage.getString("release", "");
+  strncpy(buffer, s.c_str(), sizeof(buffer));
+  splitHash(buffer, deviceConfig.timerRelease);
+
+  s = configStorage.getString("volume", "");
+  strncpy(deviceConfig.volumeLevel, s.c_str(), sizeof(deviceConfig.volumeLevel));
+
+  s = configStorage.getString("vad", "");
+  strncpy(buffer, s.c_str(), sizeof(buffer));
+  splitHash(buffer, deviceConfig.vadThreshold);
+
+  configStorage.end();
+
+  Serial.println("CONFIG LOADED");
+}
+
 /* ============================================================
    LOGGING
 ============================================================ */
@@ -271,12 +371,7 @@ void sdTask(void *pv) {
 }
 
 void logData(const char *msg) {
-
-  if (serverClient8989 && serverClient8989.connected()) {
-    serverClient8989.println(msg);
-    debugTx("8989",msg);
-    return;
-  }
+  sendSocket(msg);
 
   LogItem item;
 
@@ -285,7 +380,6 @@ void logData(const char *msg) {
 
   xQueueSend(logQueue, &item, 0);
 }
-
 /* ================= IMPORT ================= */
 
 void parseSaveFrame(char *frame) {
@@ -335,16 +429,55 @@ void parseSaveFrame(char *frame) {
 /* ============================================================
    SEND COMMAND
 ============================================================ */
-
 void processSendCommand(char *cmd) {
-
   char frame[256];
-  strncpy(frame,cmd,sizeof(frame));
+  strncpy(frame, cmd, sizeof(frame));
 
-  if (serverClient8989 && serverClient8989.connected()) {
-    serverClient8989.println(frame);
-    debugTx("8989",frame);
+  if (serverClient.connected()) {
+    serverClient.println(frame);
+    debugTx("SERVER", frame);
   }
+
+  Serial.println(frame);
+}
+
+void sendEvent1() {
+  char frame[256];
+  char dateStr[16];
+  char timeStr[16];
+
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+
+  sprintf(dateStr, "%04d/%02d/%02d",
+          t->tm_year + 1900,
+          t->tm_mon + 1,
+          t->tm_mday);
+
+  sprintf(timeStr, "%02d:%02d:%02d",
+          t->tm_hour,
+          t->tm_min,
+          t->tm_sec);
+
+  const char *kodeST = "1";
+  const char *valueSensor = "70";
+
+  sprintf(frame,
+          "SEND~B55~VTA('%s','%s','V5','%s','%s','%s','%s','%s','%s')~%s~%s~1~",
+          deviceConfig.unitNumber,
+          deviceConfig.IDCardNow,
+          kodeST,
+          valueSensor,
+          deviceConfig.vad,
+          dateStr,
+          timeStr,
+          deviceConfig.site,
+          deviceConfig.password,
+          deviceConfig.username);
+
+  sendSocket(frame);
+
+  debugTx("EVENT1", frame);
 
   Serial.println(frame);
 }
@@ -355,17 +488,15 @@ void processSendCommand(char *cmd) {
 
 String currentSSID = "";
 
-void updateAccessPoint()
-{
+void updateAccessPoint() {
   String newSSID;
 
-  if(strlen(deviceConfig.unitNumber) == 0)
+  if (strlen(deviceConfig.unitNumber) == 0)
     newSSID = "VITA-Gen3";
   else
     newSSID = String(deviceConfig.unitNumber);
 
-  if(newSSID != currentSSID)
-  {
+  if (newSSID != currentSSID) {
     Serial.print("Updating AP SSID -> ");
     Serial.println(newSSID);
 
@@ -385,7 +516,6 @@ void updateAccessPoint()
 ============================================================ */
 
 void sendDebug() {
-
   if (!debugEnabled) return;
   if (millis() - lastDebug < 1000) return;
 
@@ -397,48 +527,57 @@ void sendDebug() {
           deviceConfig.unitNumber,
           WiFi.localIP().toString().c_str());
 
-  if (serverClient8998 && serverClient8998.connected()) {
-    serverClient8998.println(msg);
-    debugTx("8998",msg);
-  }
+  sendSocket(msg);
 
   Serial.println(msg);
 }
 
-void sendExport(String frame)
-{
+void sendExport(String frame) {
   Serial.println(frame);
 
-  if (serverClient8989 && serverClient8989.connected())
-    serverClient8989.println(frame);
-
-  if (serverClient8998 && serverClient8998.connected())
-    serverClient8998.println(frame);
+  sendSocket(frame.c_str());
 }
+
+void debugWiFiStatus() {
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("===== WIFI CONNECTED =====");
+
+    Serial.print("SSID : ");
+    Serial.println(WiFi.SSID());
+
+    Serial.print("IP   : ");
+    Serial.println(WiFi.localIP());
+
+    Serial.print("RSSI : ");
+    Serial.println(WiFi.RSSI());
+
+    Serial.println("==========================");
+  }
+}
+
+
 
 /* ============================================================
    COMMAND PROCESSOR
 ============================================================ */
 
 void processCommand(char *cmd) {
-  if (strcmp(cmd, "VITA?") == 0)
-  {
+  if (strcmp(cmd, "VITA?") == 0) {
     sendExport(buildExportFrame());
     return;
   }
- if (strncmp(cmd, "SAVE~", 5) == 0)
-{
-  char frame[512];
+  if (strncmp(cmd, "SAVE~", 5) == 0) {
+    char frame[512];
 
-  strncpy(frame, cmd, sizeof(frame) - 1);
-  frame[sizeof(frame) - 1] = 0;
+    strncpy(frame, cmd, sizeof(frame) - 1);
+    frame[sizeof(frame) - 1] = 0;
 
-  parseSaveFrame(frame);
-  saveConfig();
+    parseSaveFrame(frame);
+    saveConfig();
 
-  Serial.println("CONFIG SAVED");
-  return;
-}
+    Serial.println("CONFIG SAVED");
+    return;
+  }
   if (strcmp(cmd, "LOGON!") == 0) {
     debugEnabled = true;
     return;
@@ -458,14 +597,18 @@ void processCommand(char *cmd) {
     logData(cmd + 4);
     return;
   }
+
+  if (strcmp(cmd, "1") == 0) {
+    sendEvent1();
+    return;
+  }
 }
 
 /* ============================================================
    CAN
 ============================================================ */
 
-void startCan()
-{
+void startCan() {
   if (CAN0.begin(MCP_ANY, CAN_500KBPS, MCP_16MHZ) == CAN_OK)
     Serial.println("MCP2515 OK");
   else
@@ -475,30 +618,24 @@ void startCan()
   pinMode(CAN_INT, INPUT);
 }
 
-void handleSpeed()
-{
+void handleSpeed() {
   int speed = tpoBuf[0];
   char msg[64];
-  sprintf(msg,"CAN_SPEED:%d",speed);
+  sprintf(msg, "CAN_SPEED:%d", speed);
   Serial.println(msg);
 }
 
-void canTask(void *pv)
-{
-  for(;;)
-  {
-    if(!digitalRead(CAN_INT))
-    {
-      if(xSemaphoreTake(spiMutex,pdMS_TO_TICKS(5))==pdTRUE)
-      {
-        CAN0.readMsgBuf(&rxId,&len,rxBuf);
+void canTask(void *pv) {
+  for (;;) {
+    if (!digitalRead(CAN_INT)) {
+      if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        CAN0.readMsgBuf(&rxId, &len, rxBuf);
         xSemaphoreGive(spiMutex);
 
         uint32_t canId = rxId & 0x1FFFFFFF;
-        memcpy(tpoBuf,rxBuf,8);
+        memcpy(tpoBuf, rxBuf, 8);
 
-        switch(canId)
-        {
+        switch (canId) {
           case 0x1802F3EF:
             handleSpeed();
             break;
@@ -511,7 +648,6 @@ void canTask(void *pv)
 /* ============================================================
    WIFI TASK
 ============================================================ */
-
 void wifiTask(void *pv) {
 
   WiFi.mode(WIFI_AP_STA);
@@ -521,7 +657,19 @@ void wifiTask(void *pv) {
 
   server8998.begin();
 
+  static bool wifiPrinted = false;
+
   for (;;) {
+
+    if (WiFi.status() == WL_CONNECTED && !wifiPrinted) {
+      debugWiFiStatus();
+      debugWiFiConnected();
+
+      wifiPrinted = true;
+    }
+
+    if (WiFi.status() != WL_CONNECTED)
+      wifiPrinted = false;
 
     updateAccessPoint();
     sendDebug();
@@ -530,44 +678,153 @@ void wifiTask(void *pv) {
   }
 }
 
-
 /* ============================================================
    SOCKET TASK
 ============================================================ */
 
 void socketTask(void *pv) {
-
   char buffer[256];
+  static bool clientConnected = false;
 
   for (;;) {
+    ensureWiFiConnected();
+    ensureServerConnection();
 
-    // if (!serverClient8989 || !serverClient8989.connected())
-    // serverClient8989 = server8998.available();
-    // if (serverClient8989 && serverClient8989.available()) {
+    /* =============================
+       SERVER ACCEPT CLIENT
+    ============================= */
 
-    //   int len = serverClient8989.readBytesUntil('\n', buffer, sizeof(buffer)-1);
-    //   buffer[len] = 0;
+    if (!incomingClient || !incomingClient.connected()) {
+      WiFiClient newClient = server8998.available();
 
-    //   debugRx("8989",buffer);
-    //   processCommand(buffer);
-    // }
+      if (newClient) {
+        incomingClient = newClient;
 
-    if (!serverClient8998 || !serverClient8998.connected())
-      serverClient8998 = server8998.available();
+        Serial.println("===== CLIENT CONNECTED =====");
 
-    if (serverClient8998 && serverClient8998.available()) {
+        Serial.print("Client IP : ");
+        Serial.println(incomingClient.remoteIP());
 
-      int len = serverClient8998.readBytesUntil('\n', buffer, sizeof(buffer)-1);
-      buffer[len] = 0;
+        Serial.print("Client Port : ");
+        Serial.println(incomingClient.remotePort());
 
-      debugRx("8998",buffer);
-      processCommand(buffer);
+        Serial.println("============================");
+
+        clientConnected = true;
+      }
+    }
+
+    /* =============================
+       CLIENT RECEIVE
+    ============================= */
+
+    if (incomingClient && incomingClient.available()) {
+      int len = incomingClient.readBytesUntil('\n', buffer, sizeof(buffer) - 1);
+
+      if (len > 0) {
+        buffer[len] = 0;
+
+        debugRx("CLIENT", buffer);
+
+        processCommand(buffer);
+      }
+    }
+
+    /* =============================
+       CLIENT DISCONNECT
+    ============================= */
+
+    if (clientConnected && (!incomingClient || !incomingClient.connected())) {
+      Serial.println("CLIENT DISCONNECTED");
+
+      clientConnected = false;
+    }
+
+    /* =============================
+       SERVER RESPONSE
+    ============================= */
+
+    if (serverClient.connected() && serverClient.available()) {
+      int len = serverClient.readBytesUntil('\n', buffer, sizeof(buffer) - 1);
+
+      if (len > 0) {
+        buffer[len] = 0;
+
+        debugRx("SERVER", buffer);
+        // cek respon server
+        if (strstr(buffer, "Sending#") != NULL) {
+          Serial.println("OK");
+        }
+      }
     }
 
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
+
+//Function reconnect WiFi
+void ensureWiFiConnected() {
+  if (WiFi.status() == WL_CONNECTED) return;
+
+  if (millis() - lastWifiReconnect < wifiReconnectInterval) return;
+
+  Serial.println("WIFI CONNECTING...");
+
+  WiFi.begin(deviceConfig.wifiSSID, deviceConfig.wifiPassword);
+
+  lastWifiReconnect = millis();
+}
+
+void ensureServerConnection() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  if (serverClient.connected()) return;
+
+  if (millis() - lastReconnect8989 < reconnectInterval) return;
+
+  uint16_t port = 8998;
+
+  if (strlen(deviceConfig.destination) > 0)
+    port = 8989;
+
+  Serial.print("CONNECT SERVER ");
+  Serial.print(deviceConfig.serverIP);
+  Serial.print(":");
+  Serial.println(port);
+
+  serverClient.connect(deviceConfig.serverIP, port);
+
+  lastReconnect8989 = millis();
+}
+void sendSocket(const char *msg) {
+  if (incomingClient && incomingClient.connected()) {
+    incomingClient.println(msg);
+    debugTx("CLIENT", msg);
+    return;
+  }
+
+  if (serverClient.connected()) {
+    serverClient.println(msg);
+    debugTx("SERVER", msg);
+    return;
+  }
+}
+
+void debugWiFiConnected() {
+  Serial.println("===== WIFI CONNECTED =====");
+
+  Serial.print("SSID : ");
+  Serial.println(WiFi.SSID());
+
+  Serial.print("IP   : ");
+  Serial.println(WiFi.localIP());
+
+  Serial.print("RSSI : ");
+  Serial.println(WiFi.RSSI());
+
+  Serial.println("==========================");
+}
 /* ============================================================
    SERIAL TASK
 ============================================================ */
@@ -587,8 +844,7 @@ void serialTask(void *pv) {
         buffer[index] = 0;
         processCommand(buffer);
         index = 0;
-      }
-      else if (index < 255)
+      } else if (index < 255)
         buffer[index++] = c;
     }
 
@@ -603,7 +859,7 @@ void serialTask(void *pv) {
 void setup() {
 
   Serial.begin(115200);
-
+  loadConfig();
   spiMutex = xSemaphoreCreateMutex();
 
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
@@ -617,11 +873,11 @@ void setup() {
 
   startCan();
 
-  xTaskCreatePinnedToCore(wifiTask,"wifiTask",4096,NULL,1,&wifiTaskHandle,0);
-  xTaskCreatePinnedToCore(socketTask,"socketTask",4096,NULL,1,&socketTaskHandle,1);
-  xTaskCreatePinnedToCore(serialTask,"serialTask",4096,NULL,1,&serialTaskHandle,1);
-  xTaskCreatePinnedToCore(sdTask,"sdTask",4096,NULL,1,&sdTaskHandle,1);
-  xTaskCreatePinnedToCore(canTask,"canTask",4096,NULL,2,&canTaskHandle,1);
+  xTaskCreatePinnedToCore(wifiTask, "wifiTask", 4096, NULL, 1, &wifiTaskHandle, 0);
+  xTaskCreatePinnedToCore(socketTask, "socketTask", 8192, NULL, 1, &socketTaskHandle, 1);
+  xTaskCreatePinnedToCore(serialTask, "serialTask", 4096, NULL, 1, &serialTaskHandle, 1);
+  xTaskCreatePinnedToCore(sdTask, "sdTask", 4096, NULL, 1, &sdTaskHandle, 1);
+  xTaskCreatePinnedToCore(canTask, "canTask", 4096, NULL, 2, &canTaskHandle, 1);
 
   Serial.println("VITA CONTROLLER STARTED");
 }
