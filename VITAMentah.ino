@@ -4,6 +4,8 @@
 #include <SD.h>
 #include <Preferences.h>
 #include <mcp_can.h>
+#include <Wire.h>
+#include "RTClib.h"
 
 /* ============================================================
    PIN CONFIGURATION
@@ -16,6 +18,8 @@
 
 #define CAN_CS 5
 #define CAN_INT 27
+
+RTC_DS3231 rtc;
 
 MCP_CAN CAN0(CAN_CS);
 
@@ -117,6 +121,51 @@ typedef struct
   char dateStr[16];
   char timeStr[16];
 } EventItem;
+/* ============================================================
+  Function RTC
+============================================================ */
+void fillEventTime(EventItem *item) {
+  DateTime now = rtc.now();
+
+  sprintf(item->dateStr, "%04d-%02d-%02d",
+          now.year(),
+          now.month(),
+          now.day());
+
+  sprintf(item->timeStr, "%02d:%02d:%02d",
+          now.hour(),
+          now.minute(),
+          now.second());
+}
+
+void commandTime() {  // Fucntion untuk  TIME?
+  EventItem item;
+
+  fillEventTime(&item);
+
+  char buffer[64];
+
+  sprintf(buffer, "TIME:%s %s", item.dateStr, item.timeStr);
+
+  sendSocket(buffer);
+  Serial.println(buffer);
+}
+
+void commandSetTime(char *cmd) {  //Function untuk SET TIME
+  int year, month, day, hour, minute, second;
+
+  if (sscanf(cmd, "SETTIME %d-%d-%d %d:%d:%d",
+             &year, &month, &day,
+             &hour, &minute, &second)
+      == 6) {
+    rtc.adjust(DateTime(year, month, day, hour, minute, second));
+
+    sendSocket("RTC SET OK");
+    Serial.println("RTC SET OK");
+  } else {
+    sendSocket("FORMAT: SETTIME YYYY-MM-DD HH:MM:SS");
+  }
+}
 /* ============================================================
    RTOS HANDLES
 ============================================================ */
@@ -572,6 +621,9 @@ int getNextFileNumber() {
 }
 //Function Penulisan data Event to SD Card
 void saveEventToSD(EventItem item) {
+
+  fillEventTime(&item);  // isi tanggal & jam dari RTC
+
   int num = getNextFileNumber();
 
   char filename[32];
@@ -735,35 +787,28 @@ void processSendCommand(char *cmd) {
 }
 
 void sendEvent1() {
+
   char frame[256];
-  char dateStr[16];
-  char timeStr[16];
 
-  time_t now = time(NULL);
-  struct tm *t = localtime(&now);
+  EventItem item;
 
-  sprintf(dateStr, "%04d/%02d/%02d",
-          t->tm_year + 1900,
-          t->tm_mon + 1,
-          t->tm_mday);
+  strcpy(item.event, "V5");
+  strcpy(item.kodeST, "1");
+  item.valueSensor = 70;
 
-  sprintf(timeStr, "%02d:%02d:%02d",
-          t->tm_hour,
-          t->tm_min,
-          t->tm_sec);
-
-  const char *kodeST = "1";
-  const char *valueSensor = "70";
+  // isi waktu dari RTC
+  fillEventTime(&item);
 
   sprintf(frame,
-          "SEND~B55~VTA('%s','%s','V5','%s','%s','%s','%s','%s','%s')~%s~%s~1~",
+          "SEND~B55~VTA('%s','%s','%s','%s','%d','%s','%s','%s','%s')~%s~%s~1~",
           deviceConfig.unitNumber,
           deviceConfig.IDCardNow,
-          kodeST,
-          valueSensor,
+          item.event,
+          item.kodeST,
+          item.valueSensor,
           deviceConfig.vad,
-          dateStr,
-          timeStr,
+          item.dateStr,
+          item.timeStr,
           deviceConfig.site,
           deviceConfig.password,
           deviceConfig.username);
@@ -909,6 +954,16 @@ void processCommand(char *cmd) {
 
   if (strncmp(cmd, "LOG~", 4) == 0) {
     logData(cmd + 4);
+    return;
+  }
+
+  if (strcmp(cmd, "TIME?") == 0) {
+    commandTime();
+    return;
+  }
+
+  if (strncmp(cmd, "SETTIME", 7) == 0) {
+    commandSetTime(cmd);
     return;
   }
 
@@ -1205,6 +1260,7 @@ void setup() {
   else
     Serial.println("SD INIT OK");
 
+  initRTC();
   startCan();
 
   logQueue = xQueueCreate(LOG_QUEUE_SIZE, sizeof(LogItem));
