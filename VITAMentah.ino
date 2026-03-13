@@ -77,11 +77,31 @@ typedef struct
 
   char vad[2];
   char IDCardNow[16];
+  char IDCardLast[16];
+  char WaktuDelayLowPower[4];
 
 } DeviceConfiguration;
 
 DeviceConfiguration deviceConfig;
 
+/* ============================================================
+  Event VAD (Preferences)
+============================================================ */
+Preferences VADStorage;
+//0~0~0~0~0~0~0~0~0
+typedef struct
+{
+  char HuntingGear212[3];
+  char HuntingGear323[3];
+  char CoastingNetral[3];
+  char TMAbuse[3];
+  char Spining[3];
+  char SpiningMundur[3];
+  char OverSpeedMuatan[3];
+  char OverSpeedKosongan[3];
+  char MundurJauh[3];
+}VAD;
+VAD HistoryVAD;
 /* ============================================================
    RTOS HANDLES
 ============================================================ */
@@ -859,7 +879,9 @@ void serialTask(void *pv) {
 void setup() {
 
   Serial.begin(115200);
-  loadConfig();
+  loadConfig(); //Load Config
+  loadHistoryVAD(); //Load VAD
+  
   spiMutex = xSemaphoreCreateMutex();
 
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
