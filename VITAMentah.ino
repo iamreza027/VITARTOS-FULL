@@ -100,8 +100,19 @@ typedef struct
   char OverSpeedMuatan[3];
   char OverSpeedKosongan[3];
   char MundurJauh[3];
-}VAD;
+} VAD;
 VAD HistoryVAD;
+/* ============================================================
+  Layout Sending data VTA/EVENT (Preferences)
+============================================================ */
+typedef struct
+{
+  char event[4];
+  char kodeST[4];
+  int valueSensor;
+  char dateStr[16];
+  char timeStr[16];
+} EventItem;
 /* ============================================================
    RTOS HANDLES
 ============================================================ */
@@ -119,6 +130,12 @@ TaskHandle_t canTaskHandle;
 SemaphoreHandle_t spiMutex;
 
 /* ============================================================
+   Queue
+============================================================ */
+QueueHandle_t logQueue;
+QueueHandle_t eventQueue;
+QueueHandle_t sendQueue;
+/* ============================================================
    LOG QUEUE
 ============================================================ */
 
@@ -130,7 +147,6 @@ typedef struct
   char data[LOG_ITEM_SIZE];
 } LogItem;
 
-QueueHandle_t logQueue;
 
 const char *logFile = "/buffer.log";
 
@@ -400,6 +416,73 @@ void logData(const char *msg) {
 
   xQueueSend(logQueue, &item, 0);
 }
+//Function Penomoran file
+int getNextFileNumber() {
+  int index = 1;
+  char name[32];
+
+  while (true) {
+    sprintf(name, "/EVT%04d.txt", index);
+
+    if (!SD.exists(name))
+      return index;
+
+    index++;
+  }
+}
+//Function Penulisan data Event to SD Card
+void saveEventToSD(EventItem item) {
+  int num = getNextFileNumber();
+
+  char filename[32];
+  sprintf(filename, "/EVT%04d.txt", num);
+
+  File f = SD.open(filename, FILE_WRITE);
+
+  if (!f) return;
+
+  f.printf("%s,%s,%s,%s,%d,%s,%s,%s,%s\n",
+           deviceConfig.unitNumber,
+           deviceConfig.IDCardNow,
+           item.event,
+           item.kodeST,
+           item.valueSensor,
+           deviceConfig.vad,
+           item.dateStr,
+           item.timeStr,
+           deviceConfig.site);
+
+  f.close();
+
+  Serial.print("EVENT SAVED ");
+  Serial.println(filename);
+}
+int findOldestEventFile() {
+  for (int i = 1; i < 10000; i++) {
+    char name[32];
+
+    sprintf(name, "/EVT%04d.txt", i);
+
+    if (SD.exists(name))
+      return i;
+  }
+
+  return 0;
+}
+void deleteOldestEventFile() {  //Function Menghapus File yang sudah terkirim ke Server TxWave
+  int index = findOldestEventFile();
+
+  if (index == 0) return;
+
+  char filename[32];
+
+  sprintf(filename, "/EVT%04d.txt", index);
+
+  SD.remove(filename);
+
+  Serial.print("EVENT SENT DELETE ");
+  Serial.println(filename);
+}
 /* ================= IMPORT ================= */
 
 void parseSaveFrame(char *frame) {
@@ -445,7 +528,57 @@ void parseSaveFrame(char *frame) {
     index++;
   }
 }
+/* ============================================================
+   SEND Data Event
+============================================================ */
+void sendTask(void *pv) {
+  char filename[32];
+  char buffer[256];
 
+  for (;;) {
+    if (!serverClient.connected()) {
+      vTaskDelay(pdMS_TO_TICKS(5000));
+      continue;
+    }
+
+    int fileIndex = findOldestEventFile();
+
+    if (fileIndex == 0) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+
+    sprintf(filename, "/EVT%04d.txt", fileIndex);
+
+    File f = SD.open(filename);
+
+    if (!f) {
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      continue;
+    }
+
+    String line = f.readStringUntil('\n');
+    f.close();
+
+    sendEventFrame(line.c_str());
+
+    vTaskDelay(pdMS_TO_TICKS(5000));
+  }
+}
+
+void sendEventFrame(const char *line) {  //Frame untuk pengiriman ke Server TxWave
+  char frame[256];
+
+  sprintf(frame,
+          "SEND~B55~VTA(%s)~%s~%s~1~",
+          line,
+          deviceConfig.password,
+          deviceConfig.username);
+
+  sendSocket(frame);
+
+  Serial.println(frame);
+}
 /* ============================================================
    SEND COMMAND
 ============================================================ */
@@ -625,6 +758,20 @@ void processCommand(char *cmd) {
 }
 
 /* ============================================================
+   Event Builder Task
+============================================================ */
+void eventTask(void *pv) {
+  EventItem item;
+
+  for (;;) {
+    if (xQueueReceive(eventQueue, &item, portMAX_DELAY) == pdTRUE) {
+      saveEventToSD(item);
+      xQueueSend(sendQueue, &item, 0);
+    }
+  }
+}
+
+/* ============================================================
    CAN
 ============================================================ */
 
@@ -638,12 +785,6 @@ void startCan() {
   pinMode(CAN_INT, INPUT);
 }
 
-void handleSpeed() {
-  int speed = tpoBuf[0];
-  char msg[64];
-  sprintf(msg, "CAN_SPEED:%d", speed);
-  Serial.println(msg);
-}
 
 void canTask(void *pv) {
   for (;;) {
@@ -774,6 +915,7 @@ void socketTask(void *pv) {
         // cek respon server
         if (strstr(buffer, "Sending#") != NULL) {
           Serial.println("OK");
+          deleteOldestEventFile();
         }
       }
     }
@@ -879,9 +1021,9 @@ void serialTask(void *pv) {
 void setup() {
 
   Serial.begin(115200);
-  loadConfig(); //Load Config
-  loadHistoryVAD(); //Load VAD
-  
+  loadConfig();      //Load Config
+  loadHistoryVAD();  //Load VAD
+
   spiMutex = xSemaphoreCreateMutex();
 
   SPI.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
@@ -891,10 +1033,16 @@ void setup() {
   else
     Serial.println("SD INIT OK");
 
-  logQueue = xQueueCreate(LOG_QUEUE_SIZE, sizeof(LogItem));
-
   startCan();
 
+  logQueue = xQueueCreate(LOG_QUEUE_SIZE, sizeof(LogItem));
+
+
+  eventQueue = xQueueCreate(20, sizeof(EventItem));
+  sendQueue = xQueueCreate(20, sizeof(EventItem));
+
+  xTaskCreatePinnedToCore(eventTask, "eventTask", 4096, NULL, 2, NULL, 1);
+  xTaskCreatePinnedToCore(sendTask, "sendTask", 4096, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(wifiTask, "wifiTask", 4096, NULL, 1, &wifiTaskHandle, 0);
   xTaskCreatePinnedToCore(socketTask, "socketTask", 8192, NULL, 1, &socketTaskHandle, 1);
   xTaskCreatePinnedToCore(serialTask, "serialTask", 4096, NULL, 1, &serialTaskHandle, 1);
