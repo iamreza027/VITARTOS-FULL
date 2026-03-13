@@ -42,6 +42,10 @@ const uint32_t reconnectInterval = 5000;
 unsigned long lastWifiReconnect = 0;
 const uint32_t wifiReconnectInterval = 5000;
 
+//Variable Test Over Speed by Command
+bool speedSimulation = false;
+int simulatedSpeed = 0;
+
 
 /* ============================================================
    CONFIG STORAGE (Preferences)
@@ -379,10 +383,146 @@ void loadConfig() {
 
   Serial.println("CONFIG LOADED");
 }
+/* ============================================================
+                        SD UTIL
+============================================================ */
+
+/*
+Ensure filename always begins with '/'
+*/
+void normalizePath(const char *name, char *out) {
+  if (name[0] != '/')
+    sprintf(out, "/%s", name);
+  else
+    strcpy(out, name);
+}
 
 /* ============================================================
    LOGGING
 ============================================================ */
+/* ============================================================
+                        SD FILE DELETE
+============================================================ */
+
+void fileDelete(const char *name) {
+  char path[64];
+  normalizePath(name, path);
+
+  if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    if (SD.exists(path))
+      SD.remove(path);
+
+    xSemaphoreGive(spiMutex);
+  }
+}
+
+/* ============================================================
+                    DELETE ALL FILES (FIXED)
+============================================================ */
+void deleteAllFiles() {
+  if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(500)) != pdTRUE)
+    return;
+
+  File root = SD.open("/");
+
+  if (!root) {
+    xSemaphoreGive(spiMutex);
+    return;
+  }
+
+  while (true) {
+    File entry = root.openNextFile();
+
+    if (!entry)
+      break;
+
+    if (!entry.isDirectory()) {
+      char path[64];
+
+      snprintf(path, sizeof(path), "/%s", entry.name());
+
+      SD.remove(path);
+    }
+
+    entry.close();
+
+    vTaskDelay(1);  // yield RTOS
+  }
+
+  root.close();
+
+  xSemaphoreGive(spiMutex);
+
+
+
+  char msg[] = "All File Is Delete";
+  sendSocket(msg);
+
+  Serial.println("All File Is Delete");
+}
+
+/* ============================================================
+                        COUNT FILE
+============================================================ */
+
+int fileCount() {
+  int count = 0;
+
+  if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(200)) != pdTRUE)
+    return 0;
+
+  File root = SD.open("/");
+
+  while (true) {
+    File file = root.openNextFile();
+
+    if (!file)
+      break;
+
+    count++;
+    file.close();
+  }
+
+  root.close();
+
+  xSemaphoreGive(spiMutex);
+
+  return count;
+}
+
+/* ============================================================
+                        LIST FILES
+============================================================ */
+void listFiles() {
+
+  if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(200)) != pdTRUE)
+    return;
+
+  File root = SD.open("/");
+
+  char msg[96];
+
+  while (true) {
+
+    File file = root.openNextFile();
+
+    if (!file)
+      break;
+
+    sprintf(msg, "FILE:%s", file.name());
+
+    sendSocket(msg);
+    Serial.println(msg);
+
+    file.close();
+  }
+
+  root.close();
+
+  sendSocket("END FILE LIST");
+
+  xSemaphoreGive(spiMutex);
+}
 
 void sdWriteLine(const char *line) {
   if (xSemaphoreTake(spiMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
@@ -745,6 +885,27 @@ void processCommand(char *cmd) {
     processSendCommand(cmd);
     return;
   }
+  if (strcmp(cmd, "COUNT") == 0) {
+    char msg[32];
+    sprintf(msg, "FILES:%d", fileCount());
+
+    sendSocket(msg);
+  }
+  if (strncmp(cmd, "DELETE~", 7) == 0) {
+    char *name = cmd + 7;
+    fileDelete(name);
+    return;
+  }
+
+  if (strcmp(cmd, "LIST") == 0) {
+    listFiles();
+    return;
+  }
+
+  if (strcmp(cmd, "DELALLFILE") == 0) {
+    deleteAllFiles();
+  }
+
 
   if (strncmp(cmd, "LOG~", 4) == 0) {
     logData(cmd + 4);
@@ -753,6 +914,10 @@ void processCommand(char *cmd) {
 
   if (strcmp(cmd, "1") == 0) {
     sendEvent1();
+    return;
+  }
+  if (strncmp(cmd, "SET SPEED", 9) == 0) {
+    processTestCommand(cmd);
     return;
   }
 }
@@ -774,18 +939,6 @@ void eventTask(void *pv) {
 /* ============================================================
    CAN
 ============================================================ */
-
-void startCan() {
-  if (CAN0.begin(MCP_ANY, CAN_500KBPS, MCP_16MHZ) == CAN_OK)
-    Serial.println("MCP2515 OK");
-  else
-    Serial.println("MCP2515 FAIL");
-
-  CAN0.setMode(MCP_LISTENONLY);
-  pinMode(CAN_INT, INPUT);
-}
-
-
 void canTask(void *pv) {
   for (;;) {
     if (!digitalRead(CAN_INT)) {
@@ -798,12 +951,31 @@ void canTask(void *pv) {
 
         switch (canId) {
           case 0x1802F3EF:
-            handleSpeed();
+            {
+              int speed = rxBuf[0];
+
+              handleSpeed(speed);
+            }
             break;
         }
       }
     }
     vTaskDelay(1);
+  }
+}
+
+//Fungsi Test by Command
+void processTestCommand(char *cmd) {
+  int speed;
+
+  if (sscanf(cmd, "SET SPEED %d", &speed) == 1) {
+    simulatedSpeed = speed;
+    speedSimulation = true;
+
+    Serial.print("SIMULATED SPEED = ");
+    Serial.println(simulatedSpeed);
+
+    handleSpeed(simulatedSpeed);
   }
 }
 /* ============================================================
