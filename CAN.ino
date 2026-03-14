@@ -8,29 +8,25 @@ void startCan() {
   pinMode(CAN_INT, INPUT);
 }
 
-
-void handleSpeed(int speed)
+void handleSpeed()
 {
-  Serial.print("Speed = ");
-  Serial.println(speed);
+  int speed = rxBuf[0];
 
-  if(speed > 30)
-  {
-    EventItem item;
+  canData.speed = speed;
+  canData.validSpeed = true;
+}
 
-    strcpy(item.event,"V6");
-    strcpy(item.kodeST,"1");
-    item.valueSensor = speed;
+int CAN_getSpeed()
+{
+  if (canData.simSpeedEnable)
+    return canData.simSpeed;
 
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
+  return canData.speed;
+}
 
-    sprintf(item.dateStr,"%04d/%02d/%02d",
-    t->tm_year+1900,t->tm_mon+1,t->tm_mday);
+void handleGear(){
+  int gear = rxBuf[1];
 
-    sprintf(item.timeStr,"%02d:%02d:%02d",
-    t->tm_hour,t->tm_min,t->tm_sec);
-
-    xQueueSend(eventQueue,&item,0);
-  }
+  canData.gear = gear;
+  canData.validGear = true;
 }

@@ -12,3 +12,17 @@ void initRTC(){
     Serial.println("RTC LOST POWER");
   }
 }
+
+void initDFPlayer(){
+  DFSerial.begin(9600, SERIAL_8N1, 25, 33);
+
+  if (!dfPlayer.begin(DFSerial))
+  {
+    Serial.println("DFPLAYER ERROR");
+    return;
+  }
+
+  dfPlayer.volume(25);  // 0-30
+
+  Serial.println("DFPLAYER READY");
+}

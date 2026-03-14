@@ -6,6 +6,8 @@
 #include <mcp_can.h>
 #include <Wire.h>
 #include "RTClib.h"
+#include "DFRobotDFPlayerMini.h"
+#include <HardwareSerial.h>
 
 /* ============================================================
    PIN CONFIGURATION
@@ -19,14 +21,29 @@
 #define CAN_CS 5
 #define CAN_INT 27
 
+
+//RTC
 RTC_DS3231 rtc;
 
+//DFPlayer
+HardwareSerial DFSerial(2);
+DFRobotDFPlayerMini dfPlayer;
+
+//MCP
 MCP_CAN CAN0(CAN_CS);
 
 long unsigned int rxId;
 unsigned char len = 0;
 unsigned char rxBuf[8];
 byte tpoBuf[8];
+
+//Sensor Value CAN BUS
+word speed = 0;
+
+//Variable Global Event
+uint32_t neutralStartTime = 0;
+bool costingNeutralActive = false;
+bool overspeedActive = false;
 
 /* ============================================================
    NETWORK SERVER
@@ -47,8 +64,8 @@ unsigned long lastWifiReconnect = 0;
 const uint32_t wifiReconnectInterval = 5000;
 
 //Variable Test Over Speed by Command
-bool speedSimulation = false;
-int simulatedSpeed = 0;
+// bool speedSimulation = false;
+// int simulatedSpeed = 0;
 
 
 /* ============================================================
@@ -111,7 +128,29 @@ typedef struct
 } VAD;
 VAD HistoryVAD;
 /* ============================================================
-  Layout Sending data VTA/EVENT (Preferences)
+  Struct data CAN
+============================================================ */
+typedef struct
+{
+  int speed;
+  int gear;
+  int rpmGenerator;
+
+  bool validSpeed;
+  bool validGear;
+  bool validRPM;
+
+  uint32_t lastUpdate;
+
+  // SIMULATION
+  bool simSpeedEnable;
+  int simSpeed;
+
+} CANSignals;
+
+CANSignals canData;
+/* ============================================================
+  Layout Sending data VTA/EVENT
 ============================================================ */
 typedef struct
 {
@@ -121,6 +160,15 @@ typedef struct
   char dateStr[16];
   char timeStr[16];
 } EventItem;
+/* ============================================================
+  Struct Audio
+=============================================================== */
+enum AudioEvent {
+  AUDIO_OVERSPEED = 1,
+  AUDIO_CAN_ERROR,
+  AUDIO_RTC_ERROR,
+  AUDIO_DATA_MISSING
+};
 /* ============================================================
   Function RTC
 ============================================================ */
@@ -188,6 +236,7 @@ SemaphoreHandle_t spiMutex;
 QueueHandle_t logQueue;
 QueueHandle_t eventQueue;
 QueueHandle_t sendQueue;
+QueueHandle_t audioQueue;
 /* ============================================================
    LOG QUEUE
 ============================================================ */
@@ -854,22 +903,37 @@ void updateAccessPoint() {
 ============================================================ */
 
 void sendDebug() {
+
+  EventItem item;
+
   if (!debugEnabled) return;
   if (millis() - lastDebug < 1000) return;
 
   lastDebug = millis();
 
-  char msg[80];
+  fillEventTime(&item);
 
-  sprintf(msg, "DEBUG~%s~IP:%s",
-          deviceConfig.unitNumber,
-          WiFi.localIP().toString().c_str());
+  char msg[128];
+
+  snprintf(msg, sizeof(msg),
+           "IDCardNow=%s,IDCardLast=%s,Speed=%d,Gear=%d,Date=%s,Time=%s",
+           deviceConfig.IDCardNow,
+           deviceConfig.IDCardLast,
+           CAN_getSpeed(),
+           canData.gear,
+           item.dateStr,
+           item.timeStr);
 
   sendSocket(msg);
 
   Serial.println(msg);
-}
+  Serial.print("Speed Source: ");
 
+  if (canData.simSpeedEnable)
+    Serial.println("SIMULATION");
+  else
+    Serial.println("CAN BUS");
+}
 void sendExport(String frame) {
   Serial.println(frame);
 
@@ -971,10 +1035,33 @@ void processCommand(char *cmd) {
     sendEvent1();
     return;
   }
-  if (strncmp(cmd, "SET SPEED", 9) == 0) {
-    processTestCommand(cmd);
-    return;
-  }
+  if (strncmp(cmd, "SET SPEED", 9) == 0)
+{
+  int value = atoi(cmd + 10);
+
+  canData.simSpeedEnable = true;
+  canData.simSpeed = value;
+
+  Serial.print("SIM SPEED SET : ");
+  Serial.println(value);
+}
+if (strcmp(cmd,"SET SPEED CAN")==0)
+{
+  canData.simSpeedEnable = false;
+
+  Serial.println("BACK TO CAN SPEED");
+}
+if (strncmp(cmd, "SET GEAR", 8) == 0)
+{
+  int value = atoi(cmd + 9);
+
+  canData.gear = value;
+  canData.validGear = true;
+
+  Serial.print("GEAR SET : ");
+  Serial.println(value);
+}
+
 }
 
 /* ============================================================
@@ -1002,35 +1089,60 @@ void canTask(void *pv) {
         xSemaphoreGive(spiMutex);
 
         uint32_t canId = rxId & 0x1FFFFFFF;
+
         memcpy(tpoBuf, rxBuf, 8);
 
         switch (canId) {
-          case 0x1802F3EF:
-            {
-              int speed = rxBuf[0];
 
-              handleSpeed(speed);
+          case 0x1802F3EF:  // SPEED
+            {
+              canData.speed = rxBuf[0];
+              canData.validSpeed = true;
+              canData.lastUpdate = millis();
+            }
+            break;
+
+          case 0x18F00517:  // GEAR
+            {
+              canData.gear = rxBuf[1];
+              canData.validGear = true;
+            }
+            break;
+
+          case 0x18F101D0:  // RPM
+            {
+              canData.rpmGenerator = (rxBuf[0] << 8) | rxBuf[1];
+              canData.validRPM = true;
             }
             break;
         }
       }
     }
+
     vTaskDelay(1);
   }
 }
 
 //Fungsi Test by Command
 void processTestCommand(char *cmd) {
-  int speed;
+  int value;
 
-  if (sscanf(cmd, "SET SPEED %d", &speed) == 1) {
-    simulatedSpeed = speed;
-    speedSimulation = true;
+  // simulasi speed
+  if (strncmp(cmd, "SET SPEED", 9) == 0) {
+    int value = atoi(cmd + 10);
 
-    Serial.print("SIMULATED SPEED = ");
-    Serial.println(simulatedSpeed);
+    canData.simSpeedEnable = true;
+    canData.simSpeed = value;
 
-    handleSpeed(simulatedSpeed);
+    Serial.print("SIM SPEED SET : ");
+    Serial.println(value);
+  }
+
+  // kembali ke CAN asli
+  if (strcmp(cmd, "SET SPEED CAN") == 0) {
+    canData.simSpeedEnable = false;
+
+    Serial.println("BACK TO CAN SPEED");
   }
 }
 /* ============================================================
@@ -1215,6 +1327,42 @@ void debugWiFiConnected() {
   Serial.println("==========================");
 }
 /* ============================================================
+   DFPlayer TASK
+============================================================ */
+void taskAudio(void *pv) {
+  uint8_t audioID;
+
+  for (;;) {
+    if (xQueueReceive(audioQueue, &audioID, portMAX_DELAY)) {
+      dfPlayer.play(audioID);
+
+      vTaskDelay(pdMS_TO_TICKS(3500));
+      // tunggu suara selesai (non blocking task lain)
+    }
+  }
+}
+
+uint32_t lastAudioTime = 0;
+
+void playAudio(uint8_t id) {
+  if (millis() - lastAudioTime < 2000) return;
+
+  lastAudioTime = millis();
+
+  xQueueSend(audioQueue, &id, 0);
+}
+/* ============================================================
+   Task Event
+============================================================ */
+void taskCANLogic(void *pv) {
+  for (;;) {
+    CheckOverspeed();
+    CheckCostingNetral();
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
+/* ============================================================
    SERIAL TASK
 ============================================================ */
 
@@ -1262,12 +1410,13 @@ void setup() {
 
   initRTC();
   startCan();
+  initDFPlayer();
+
 
   logQueue = xQueueCreate(LOG_QUEUE_SIZE, sizeof(LogItem));
-
-
   eventQueue = xQueueCreate(20, sizeof(EventItem));
   sendQueue = xQueueCreate(20, sizeof(EventItem));
+  audioQueue = xQueueCreate(10, sizeof(uint8_t));
 
   xTaskCreatePinnedToCore(eventTask, "eventTask", 4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(sendTask, "sendTask", 4096, NULL, 1, NULL, 1);
@@ -1276,6 +1425,8 @@ void setup() {
   xTaskCreatePinnedToCore(serialTask, "serialTask", 4096, NULL, 1, &serialTaskHandle, 1);
   xTaskCreatePinnedToCore(sdTask, "sdTask", 4096, NULL, 1, &sdTaskHandle, 1);
   xTaskCreatePinnedToCore(canTask, "canTask", 4096, NULL, 2, &canTaskHandle, 1);
+  xTaskCreatePinnedToCore(taskAudio, "AudioTask", 4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(taskCANLogic, "CANLogic", 4096, NULL, 1, NULL, 1);
 
   Serial.println("VITA CONTROLLER STARTED");
 }
