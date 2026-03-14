@@ -2,7 +2,12 @@ void CheckOverspeed()
 {
   int speed = CAN_getSpeed();
 
-  if (speed > 30)
+  bool overspeed = speed > 30;
+
+  // update kondisi audio
+  requestAudio(AUDIO_OVERSPEED, overspeed);
+
+  if (overspeed)
   {
     if (!overspeedActive)
     {
@@ -34,7 +39,12 @@ void CheckCostingNetral()
   int speed = CAN_getSpeed();
   int gear  = canData.gear;
 
-  if (gear == 0 && speed > 5)
+  bool coastingCondition = (gear == 0 && speed > 5);
+
+  // update kondisi audio
+  requestAudio(AUDIO_COASTING, coastingCondition);
+
+  if (coastingCondition)
   {
     if (neutralStartTime == 0)
       neutralStartTime = millis();
@@ -44,6 +54,8 @@ void CheckCostingNetral()
       if (!costingNeutralActive)
       {
         costingNeutralActive = true;
+
+        playAudio(AUDIO_COASTING);
 
         EventItem item;
 

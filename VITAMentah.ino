@@ -29,6 +29,9 @@ RTC_DS3231 rtc;
 HardwareSerial DFSerial(2);
 DFRobotDFPlayerMini dfPlayer;
 
+bool audioCondition = false;
+uint8_t audioFile = 0;
+
 //MCP
 MCP_CAN CAN0(CAN_CS);
 
@@ -165,6 +168,7 @@ typedef struct
 =============================================================== */
 enum AudioEvent {
   AUDIO_OVERSPEED = 1,
+  AUDIO_COASTING,
   AUDIO_CAN_ERROR,
   AUDIO_RTC_ERROR,
   AUDIO_DATA_MISSING
@@ -1330,16 +1334,30 @@ void debugWiFiConnected() {
    DFPlayer TASK
 ============================================================ */
 void taskAudio(void *pv) {
+
   uint8_t audioID;
 
   for (;;) {
-    if (xQueueReceive(audioQueue, &audioID, portMAX_DELAY)) {
-      dfPlayer.play(audioID);
 
-      vTaskDelay(pdMS_TO_TICKS(3500));
-      // tunggu suara selesai (non blocking task lain)
+    if (xQueueReceive(audioQueue, &audioID, portMAX_DELAY)) {
+
+      do {
+
+        dfPlayer.play(audioID);
+
+        vTaskDelay(pdMS_TO_TICKS(3500)); // tunggu MP3 selesai
+
+      } while (audioCondition && audioFile == audioID);
+
     }
+
   }
+}
+
+void requestAudio(uint8_t file, bool condition)
+{
+  audioFile = file;
+  audioCondition = condition;
 }
 
 uint32_t lastAudioTime = 0;
