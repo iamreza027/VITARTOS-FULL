@@ -25,7 +25,7 @@
 RTC_DS3231 rtc;
 
 //UART
-HardwareSerial externalSerial(2);
+HardwareSerial externalSerial(1);
 
 //DFPlayer
 HardwareSerial DFSerial(2);
@@ -386,7 +386,7 @@ String buildExportFrame() {
 void saveConfig() {
   configStorage.begin("devicecfg", false);
 
-  char buffer[64];
+  char buffer[128];
 
   configStorage.putString("site", deviceConfig.site);
   configStorage.putString("type", deviceConfig.vehicleType);
@@ -461,7 +461,7 @@ void loadConfig() {
   s = configStorage.getString("pwd", "");
   strncpy(deviceConfig.password, s.c_str(), sizeof(deviceConfig.password));
 
-  char buffer[64];
+  char buffer[128];
 
   s = configStorage.getString("rpm", "");
   strncpy(buffer, s.c_str(), sizeof(buffer));
@@ -1462,9 +1462,10 @@ void taskExternalParser(void *pv) {
 }
 
 float AngelX,AngelY;
-void parseExternalFrame(char *msg) {
+
+void parseExternalFrame(char *msg){
   char *start = strchr(msg, '*');
-  char *end = strchr(msg, '#');
+  char *end   = strchr(msg, '#');
 
   if (!start || !end) return;
 
@@ -1475,47 +1476,58 @@ void parseExternalFrame(char *msg) {
 
   token = strtok(start, ",");
 
-  if (token) {
-    updateIDCard(token);
+  // ===== RFID =====
+  if (token)
+  {
+    if (strcmp(token, "-") != 0)   // hanya proses jika bukan "-"
+    {
+      updateIDCard(token);
+
+      Serial.println("UART RFID RECEIVED");
+      Serial.print("RFID : ");
+      Serial.println(token);
+    }
   }
 
+  // ===== ANGLE X =====
   token = strtok(NULL, ",");
-
   if (token)
     AngelX = atof(token);
 
+  // ===== ANGLE Y =====
   token = strtok(NULL, ",");
-
   if (token)
     AngelY = atof(token);
-
-  Serial.println("UART FRAME RECEIVED");
-
-  Serial.print("IDCardNow   : ");
-  Serial.println(deviceConfig.IDCardNow);
-
-  Serial.print("IDCardBefor : ");
-  Serial.println(deviceConfig.IDCardBefor);
-
-  Serial.print("AngelX      : ");
-  Serial.println(AngelX);
-
-  Serial.print("AngelY      : ");
-  Serial.println(AngelY);
 }
-void updateIDCard(const char *newID) {
-  if (strcmp(deviceConfig.IDCardNow, newID) != 0) {
+void updateIDCard(const char *newID){
+  // abaikan jika "-"
+  if (strcmp(newID, "-") == 0)
+    return;
+
+  // hanya update jika berbeda
+  if (strcmp(deviceConfig.IDCardNow, newID) != 0)
+  {
+    // geser ID lama
     strncpy(deviceConfig.IDCardBefor,
             deviceConfig.IDCardNow,
             sizeof(deviceConfig.IDCardBefor) - 1);
 
     deviceConfig.IDCardBefor[sizeof(deviceConfig.IDCardBefor) - 1] = '\0';
 
+    // simpan ID baru
     strncpy(deviceConfig.IDCardNow,
             newID,
             sizeof(deviceConfig.IDCardNow) - 1);
 
     deviceConfig.IDCardNow[sizeof(deviceConfig.IDCardNow) - 1] = '\0';
+
+    Serial.println("RFID UPDATED");
+
+    Serial.print("IDCardNow   : ");
+    Serial.println(deviceConfig.IDCardNow);
+
+    Serial.print("IDCardBefor : ");
+    Serial.println(deviceConfig.IDCardBefor);
 
     saveIDCardPreference();
   }
