@@ -12,18 +12,20 @@
 /* ============================================================
    PIN CONFIGURATION
 ============================================================ */
-
 #define SD_CS 4
 #define SD_SCK 18
 #define SD_MISO 19
 #define SD_MOSI 23
-
 #define CAN_CS 5
 #define CAN_INT 27
-
+#define EXTERNAL_SERIAL_RX_PIN 14
+#define EXTERNAL_SERIAL_TX_PIN 12
 
 //RTC
 RTC_DS3231 rtc;
+
+//UART
+HardwareSerial externalSerial(2);
 
 //DFPlayer
 HardwareSerial DFSerial(2);
@@ -77,8 +79,7 @@ const uint32_t wifiReconnectInterval = 5000;
 
 Preferences configStorage;
 
-typedef struct
-{
+typedef struct {
   char site[16];
   char vehicleType[16];
   char unitNumber[16];
@@ -105,7 +106,7 @@ typedef struct
 
   char vad[2];
   char IDCardNow[16];
-  char IDCardLast[16];
+  char IDCardBefor[16];
   char WaktuDelayLowPower[4];
 
 } DeviceConfiguration;
@@ -163,6 +164,15 @@ typedef struct
   char dateStr[16];
   char timeStr[16];
 } EventItem;
+/* ============================================================
+  UART
+=============================================================== */
+typedef struct
+{
+  char frame[64];
+} ExternalSerialFrame;
+
+
 /* ============================================================
   Struct Audio
 =============================================================== */
@@ -241,6 +251,7 @@ QueueHandle_t logQueue;
 QueueHandle_t eventQueue;
 QueueHandle_t sendQueue;
 QueueHandle_t audioQueue;
+QueueHandle_t externalSerialQueue;
 /* ============================================================
    LOG QUEUE
 ============================================================ */
@@ -922,7 +933,7 @@ void sendDebug() {
   snprintf(msg, sizeof(msg),
            "IDCardNow=%s,IDCardLast=%s,Speed=%d,Gear=%d,Date=%s,Time=%s",
            deviceConfig.IDCardNow,
-           deviceConfig.IDCardLast,
+           deviceConfig.IDCardBefor,
            CAN_getSpeed(),
            canData.gear,
            item.dateStr,
@@ -1039,33 +1050,29 @@ void processCommand(char *cmd) {
     sendEvent1();
     return;
   }
-  if (strncmp(cmd, "SET SPEED", 9) == 0)
-{
-  int value = atoi(cmd + 10);
+  if (strncmp(cmd, "SET SPEED", 9) == 0) {
+    int value = atoi(cmd + 10);
 
-  canData.simSpeedEnable = true;
-  canData.simSpeed = value;
+    canData.simSpeedEnable = true;
+    canData.simSpeed = value;
 
-  Serial.print("SIM SPEED SET : ");
-  Serial.println(value);
-}
-if (strcmp(cmd,"SET SPEED CAN")==0)
-{
-  canData.simSpeedEnable = false;
+    Serial.print("SIM SPEED SET : ");
+    Serial.println(value);
+  }
+  if (strcmp(cmd, "SET SPEED CAN") == 0) {
+    canData.simSpeedEnable = false;
 
-  Serial.println("BACK TO CAN SPEED");
-}
-if (strncmp(cmd, "SET GEAR", 8) == 0)
-{
-  int value = atoi(cmd + 9);
+    Serial.println("BACK TO CAN SPEED");
+  }
+  if (strncmp(cmd, "SET GEAR", 8) == 0) {
+    int value = atoi(cmd + 9);
 
-  canData.gear = value;
-  canData.validGear = true;
+    canData.gear = value;
+    canData.validGear = true;
 
-  Serial.print("GEAR SET : ");
-  Serial.println(value);
-}
-
+    Serial.print("GEAR SET : ");
+    Serial.println(value);
+  }
 }
 
 /* ============================================================
@@ -1345,17 +1352,14 @@ void taskAudio(void *pv) {
 
         dfPlayer.play(audioID);
 
-        vTaskDelay(pdMS_TO_TICKS(3500)); // tunggu MP3 selesai
+        vTaskDelay(pdMS_TO_TICKS(3500));  // tunggu MP3 selesai
 
       } while (audioCondition && audioFile == audioID);
-
     }
-
   }
 }
 
-void requestAudio(uint8_t file, bool condition)
-{
+void requestAudio(uint8_t file, bool condition) {
   audioFile = file;
   audioCondition = condition;
 }
@@ -1408,14 +1412,134 @@ void serialTask(void *pv) {
 }
 
 /* ============================================================
+   HARDWARE SERIAL TASK
+============================================================ */
+void taskExternalSerial(void *pv) {
+  static char buffer[64];
+  int index = 0;
+  bool receiving = false;
+
+  ExternalSerialFrame frame;
+
+  for (;;) {
+    while (externalSerial.available()) {
+      char c = externalSerial.read();
+
+      if (c == '*') {
+        index = 0;
+        receiving = true;
+      }
+
+      if (receiving) {
+        if (index < sizeof(buffer) - 1)
+          buffer[index++] = c;
+      }
+
+      if (c == '#') {
+        buffer[index] = '\0';
+
+        strcpy(frame.frame, buffer);
+
+        xQueueSend(externalSerialQueue, &frame, 0);
+
+        receiving = false;
+        index = 0;
+      }
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
+void taskExternalParser(void *pv) {
+  ExternalSerialFrame frame;
+
+  for (;;) {
+    if (xQueueReceive(externalSerialQueue, &frame, portMAX_DELAY)) {
+      parseExternalFrame(frame.frame);
+    }
+  }
+}
+
+float AngelX,AngelY;
+void parseExternalFrame(char *msg) {
+  char *start = strchr(msg, '*');
+  char *end = strchr(msg, '#');
+
+  if (!start || !end) return;
+
+  *end = '\0';
+  start++;
+
+  char *token;
+
+  token = strtok(start, ",");
+
+  if (token) {
+    updateIDCard(token);
+  }
+
+  token = strtok(NULL, ",");
+
+  if (token)
+    AngelX = atof(token);
+
+  token = strtok(NULL, ",");
+
+  if (token)
+    AngelY = atof(token);
+
+  Serial.println("UART FRAME RECEIVED");
+
+  Serial.print("IDCardNow   : ");
+  Serial.println(deviceConfig.IDCardNow);
+
+  Serial.print("IDCardBefor : ");
+  Serial.println(deviceConfig.IDCardBefor);
+
+  Serial.print("AngelX      : ");
+  Serial.println(AngelX);
+
+  Serial.print("AngelY      : ");
+  Serial.println(AngelY);
+}
+void updateIDCard(const char *newID) {
+  if (strcmp(deviceConfig.IDCardNow, newID) != 0) {
+    strncpy(deviceConfig.IDCardBefor,
+            deviceConfig.IDCardNow,
+            sizeof(deviceConfig.IDCardBefor) - 1);
+
+    deviceConfig.IDCardBefor[sizeof(deviceConfig.IDCardBefor) - 1] = '\0';
+
+    strncpy(deviceConfig.IDCardNow,
+            newID,
+            sizeof(deviceConfig.IDCardNow) - 1);
+
+    deviceConfig.IDCardNow[sizeof(deviceConfig.IDCardNow) - 1] = '\0';
+
+    saveIDCardPreference();
+  }
+}
+void saveIDCardPreference() {
+  configStorage.begin("devicecfg", false);
+
+  configStorage.putString("IDNow", deviceConfig.IDCardNow);
+  configStorage.putString("IDPrev", deviceConfig.IDCardBefor);
+
+  configStorage.end();
+
+  Serial.println("ID CARD SAVED");
+}
+/* ============================================================
    SETUP
 ============================================================ */
 
 void setup() {
 
   Serial.begin(115200);
-  loadConfig();      //Load Config
-  loadHistoryVAD();  //Load VAD
+  externalSerial.begin(115200, SERIAL_8N1, EXTERNAL_SERIAL_RX_PIN, EXTERNAL_SERIAL_TX_PIN);  //UART to NANO
+  loadConfig();                                                                              //Load Config
+  loadHistoryVAD();                                                                          //Load VAD
 
   spiMutex = xSemaphoreCreateMutex();
 
@@ -1435,6 +1559,7 @@ void setup() {
   eventQueue = xQueueCreate(20, sizeof(EventItem));
   sendQueue = xQueueCreate(20, sizeof(EventItem));
   audioQueue = xQueueCreate(10, sizeof(uint8_t));
+  externalSerialQueue = xQueueCreate(10, sizeof(ExternalSerialFrame));
 
   xTaskCreatePinnedToCore(eventTask, "eventTask", 4096, NULL, 2, NULL, 1);
   xTaskCreatePinnedToCore(sendTask, "sendTask", 4096, NULL, 1, NULL, 1);
@@ -1445,6 +1570,8 @@ void setup() {
   xTaskCreatePinnedToCore(canTask, "canTask", 4096, NULL, 2, &canTaskHandle, 1);
   xTaskCreatePinnedToCore(taskAudio, "AudioTask", 4096, NULL, 1, NULL, 1);
   xTaskCreatePinnedToCore(taskCANLogic, "CANLogic", 4096, NULL, 1, NULL, 1);
+  xTaskCreatePinnedToCore(taskExternalSerial, "UART_RX", 4096, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(taskExternalParser, "UART_PARSE", 4096, NULL, 2, NULL, 1);
 
   Serial.println("VITA CONTROLLER STARTED");
 }
