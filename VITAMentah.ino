@@ -21,6 +21,11 @@
 #define EXTERNAL_SERIAL_RX_PIN 14
 #define EXTERNAL_SERIAL_TX_PIN 12
 
+#define INTERLOCK 2
+
+
+
+
 //RTC
 RTC_DS3231 rtc;
 
@@ -955,24 +960,6 @@ void sendExport(String frame) {
   sendSocket(frame.c_str());
 }
 
-void debugWiFiStatus() {
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("===== WIFI CONNECTED =====");
-
-    Serial.print("SSID : ");
-    Serial.println(WiFi.SSID());
-
-    Serial.print("IP   : ");
-    Serial.println(WiFi.localIP());
-
-    Serial.print("RSSI : ");
-    Serial.println(WiFi.RSSI());
-
-    Serial.println("==========================");
-  }
-}
-
-
 
 /* ============================================================
    COMMAND PROCESSOR
@@ -1173,7 +1160,6 @@ void wifiTask(void *pv) {
   for (;;) {
 
     if (WiFi.status() == WL_CONNECTED && !wifiPrinted) {
-      debugWiFiStatus();
       debugWiFiConnected();
 
       wifiPrinted = true;
@@ -1289,7 +1275,12 @@ void ensureWiFiConnected() {
 }
 
 void ensureServerConnection() {
-  if (WiFi.status() != WL_CONNECTED) return;
+  static bool printed = false;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    printed = false;  // reset kalau WiFi putus
+    return;
+  }
 
   if (serverClient.connected()) return;
 
@@ -1300,10 +1291,14 @@ void ensureServerConnection() {
   if (strlen(deviceConfig.destination) > 0)
     port = 8989;
 
-  Serial.print("CONNECT SERVER ");
-  Serial.print(deviceConfig.serverIP);
-  Serial.print(":");
-  Serial.println(port);
+  if (!printed) {
+    Serial.print("CONNECT SERVER ");
+    Serial.print(deviceConfig.serverIP);
+    Serial.print(":");
+    Serial.println(port);
+
+    printed = true;  // hanya print sekali
+  }
 
   serverClient.connect(deviceConfig.serverIP, port);
 
@@ -1461,11 +1456,11 @@ void taskExternalParser(void *pv) {
   }
 }
 
-float AngelX,AngelY;
+float AngelX, AngelY;
 
-void parseExternalFrame(char *msg){
+void parseExternalFrame(char *msg) {
   char *start = strchr(msg, '*');
-  char *end   = strchr(msg, '#');
+  char *end = strchr(msg, '#');
 
   if (!start || !end) return;
 
@@ -1477,9 +1472,8 @@ void parseExternalFrame(char *msg){
   token = strtok(start, ",");
 
   // ===== RFID =====
-  if (token)
-  {
-    if (strcmp(token, "-") != 0)   // hanya proses jika bukan "-"
+  if (token) {
+    if (strcmp(token, "-") != 0)  // hanya proses jika bukan "-"
     {
       updateIDCard(token);
 
@@ -1499,14 +1493,13 @@ void parseExternalFrame(char *msg){
   if (token)
     AngelY = atof(token);
 }
-void updateIDCard(const char *newID){
+void updateIDCard(const char *newID) {
   // abaikan jika "-"
   if (strcmp(newID, "-") == 0)
     return;
 
   // hanya update jika berbeda
-  if (strcmp(deviceConfig.IDCardNow, newID) != 0)
-  {
+  if (strcmp(deviceConfig.IDCardNow, newID) != 0) {
     // geser ID lama
     strncpy(deviceConfig.IDCardBefor,
             deviceConfig.IDCardNow,
@@ -1552,6 +1545,9 @@ void setup() {
   externalSerial.begin(115200, SERIAL_8N1, EXTERNAL_SERIAL_RX_PIN, EXTERNAL_SERIAL_TX_PIN);  //UART to NANO
   loadConfig();                                                                              //Load Config
   loadHistoryVAD();                                                                          //Load VAD
+
+  pinMode(INTERLOCK, OUTPUT);
+  digitalWrite(INTERLOCK, HIGH);
 
   spiMutex = xSemaphoreCreateMutex();
 
